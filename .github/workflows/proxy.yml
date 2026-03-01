@@ -7,46 +7,48 @@ jobs:
   proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Shadowsocks
-        run: sudo apt-get install -y shadowsocks-libev
-
-      - name: Configure Shadowsocks
+      - name: Install V2Ray
         run: |
-          sudo tee /etc/shadowsocks-libev/config.json > /dev/null << EOF
+          curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh | sudo bash
+
+      - name: Configure V2Ray
+        run: |
+          sudo tee /usr/local/etc/v2ray/config.json > /dev/null << 'EOF'
           {
-            "server": "0.0.0.0",
-            "server_port": 8388,
-            "password": "${{ secrets.SS_PASSWORD }}",
-            "method": "chacha20-ietf-poly1305"
+            "inbounds": [{
+              "port": 8080,
+              "protocol": "vmess",
+              "settings": {
+                "clients": [{"id": "${{ secrets.V2RAY_UUID }}"}]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": {"path": "/v2ray"}
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom"
+            }]
           }
           EOF
 
-      - name: Start Shadowsocks
-        run: sudo systemctl start shadowsocks-libev
+      - name: Start V2Ray
+        run: sudo systemctl start v2ray
 
-      - name: Start tunnel & get address
+      - name: Start HTTP tunnel
         run: |
           ssh -o StrictHostKeyChecking=no \
               -o ServerAliveInterval=60 \
-              -R 8388:localhost:8388 \
+              -R 80:localhost:8080 \
               nokey@localhost.run > /tmp/tunnel.log 2>&1 &
           sleep 10
 
           echo "=== tunnel log ==="
           cat /tmp/tunnel.log
 
-          # 尝试多种格式匹配
-          TUNNEL_LINE=$(grep -oP '[a-z0-9\-]+\.lhr\.life:\d+' /tmp/tunnel.log | head -1)
-          echo "=== matched line: $TUNNEL_LINE ==="
-
-          HOST=$(echo $TUNNEL_LINE | cut -d: -f1)
-          PORT=$(echo $TUNNEL_LINE | cut -d: -f2)
-
+          HOST=$(grep -oP '[a-z0-9\-]+\.lhr\.life' /tmp/tunnel.log | head -1)
           echo "HOST=$HOST"
-          echo "PORT=$PORT"
-
           echo "HOST=$HOST" >> $GITHUB_ENV
-          echo "PORT=$PORT" >> $GITHUB_ENV
 
       - name: Send email notification
         run: |
@@ -55,13 +57,54 @@ jobs:
           from email.mime.text import MIMEText
 
           host = "${{ env.HOST }}"
-          port = "${{ env.PORT }}"
-          password = "${{ secrets.SS_PASSWORD }}"
+          uuid = "${{ secrets.V2RAY_UUID }}"
 
-          body = f"server: {host}\nport: {port}\npassword: {password}"
+          body = f"""V2Ray 代理已启动
+
+          ClashX / Clash for Windows config.yaml 配置：
+
+          mixed-port: 7890
+          allow-lan: false
+          mode: rule
+          log-level: info
+
+          proxies:
+            - name: "GitHub"
+              type: vmess
+              server: {host}
+              port: 443
+              uuid: {uuid}
+              alterId: 0
+              cipher: auto
+              tls: true
+              network: ws
+              ws-opts:
+                path: /v2ray
+
+          proxy-groups:
+            - name: "Proxy"
+              type: select
+              proxies:
+                - GitHub
+
+          rules:
+            - DOMAIN-SUFFIX,github.com,Proxy
+            - DOMAIN-SUFFIX,githubcopilot.com,Proxy
+            - DOMAIN-SUFFIX,copilot.github.com,Proxy
+            - DOMAIN-SUFFIX,api.github.com,Proxy
+            - DOMAIN-SUFFIX,objects.githubusercontent.com,Proxy
+            - DOMAIN-SUFFIX,vscode.dev,Proxy
+            - DOMAIN-SUFFIX,marketplace.visualstudio.com,Proxy
+            - DOMAIN-SUFFIX,google.com,Proxy
+            - DOMAIN-SUFFIX,youtube.com,Proxy
+            - DOMAIN-SUFFIX,anthropic.com,Proxy
+            - MATCH,DIRECT
+
+          注意：此代理最长可用 6 小时，到期后请重新触发 workflow。
+          """
 
           msg = MIMEText(body)
-          msg["Subject"] = "✅ Shadowsocks 代理已启动"
+          msg["Subject"] = "✅ V2Ray 代理已启动"
           msg["From"] = "${{ secrets.MAIL_USER }}"
           msg["To"] = "${{ secrets.MAIL_USER }}"
 
