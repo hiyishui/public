@@ -21,36 +21,20 @@ jobs:
           }
           EOF
 
+      - name: Start Shadowsocks
+        run: sudo systemctl start shadowsocks-libev
+
       - name: Start tunnel & get address
         run: |
-          # 使用 localhost.run，无需注册
           ssh -o StrictHostKeyChecking=no \
               -o ServerAliveInterval=60 \
               -R 8388:localhost:8388 \
               nokey@localhost.run > /tmp/tunnel.log 2>&1 &
           sleep 8
-          # 解析地址
+          cat /tmp/tunnel.log
           TUNNEL_LINE=$(cat /tmp/tunnel.log | grep -o '[a-z0-9]*\.lhr\.life:[0-9]*' | head -1)
           HOST=$(echo $TUNNEL_LINE | cut -d: -f1)
           PORT=$(echo $TUNNEL_LINE | cut -d: -f2)
-          echo "HOST=$HOST" >> $GITHUB_ENV
-          echo "PORT=$PORT" >> $GITHUB_ENV
-          echo "代理地址: $HOST:$PORT"
-
-      - name: Start Shadowsocks
-        run: sudo systemctl start shadowsocks-libev
-
-      - name: Start ngrok & get address
-        run: |
-          ngrok tcp 8388 > /dev/null &
-          sleep 5
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print(data['tunnels'][0]['public_url'])
-          ")
-          HOST=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d: -f1)
-          PORT=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d: -f2)
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
           echo "代理地址: $HOST:$PORT"
