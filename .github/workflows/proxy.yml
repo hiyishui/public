@@ -13,8 +13,9 @@ jobs:
 
       - name: Configure V2Ray
         run: |
-          sudo tee /usr/local/etc/v2ray/config.json > /dev/null << 'EOF'
-          {
+          python3 << EOF
+          import json, os
+          config = {
             "inbounds": [{
               "port": 8080,
               "protocol": "vmess",
@@ -26,14 +27,22 @@ jobs:
                 "wsSettings": {"path": "/v2ray"}
               }
             }],
-            "outbounds": [{
-              "protocol": "freedom"
-            }]
+            "outbounds": [{"protocol": "freedom"}]
           }
+          with open("/tmp/v2ray_config.json", "w") as f:
+            json.dump(config, f, indent=2)
           EOF
+          sudo cp /tmp/v2ray_config.json /usr/local/etc/v2ray/config.json
+          echo "=== V2Ray config ==="
+          cat /usr/local/etc/v2ray/config.json
 
       - name: Start V2Ray
-        run: sudo systemctl start v2ray
+        run: |
+          sudo systemctl start v2ray
+          sleep 3
+          sudo systemctl status v2ray
+          echo "=== V2Ray listening ==="
+          ss -tlnp | grep 8080 || echo "WARNING: port 8080 not listening"
 
       - name: Start HTTP tunnel
         run: |
@@ -57,50 +66,15 @@ jobs:
           from email.mime.text import MIMEText
 
           host = "${{ env.HOST }}"
-          uuid = "${{ secrets.V2RAY_UUID }}"
 
           body = f"""V2Ray 代理已启动
 
-          ClashX / Clash for Windows config.yaml 配置：
+          请更新 ClashX config.yaml 中的 server 字段：
 
-          mixed-port: 7890
-          allow-lan: false
-          mode: rule
-          log-level: info
+          server: {host}
 
-          proxies:
-            - name: "GitHub"
-              type: vmess
-              server: {host}
-              port: 443
-              uuid: {uuid}
-              alterId: 0
-              cipher: auto
-              tls: true
-              network: ws
-              ws-opts:
-                path: /v2ray
-
-          proxy-groups:
-            - name: "Proxy"
-              type: select
-              proxies:
-                - GitHub
-
-          rules:
-            - DOMAIN-SUFFIX,github.com,Proxy
-            - DOMAIN-SUFFIX,githubcopilot.com,Proxy
-            - DOMAIN-SUFFIX,copilot.github.com,Proxy
-            - DOMAIN-SUFFIX,api.github.com,Proxy
-            - DOMAIN-SUFFIX,objects.githubusercontent.com,Proxy
-            - DOMAIN-SUFFIX,vscode.dev,Proxy
-            - DOMAIN-SUFFIX,marketplace.visualstudio.com,Proxy
-            - DOMAIN-SUFFIX,google.com,Proxy
-            - DOMAIN-SUFFIX,youtube.com,Proxy
-            - DOMAIN-SUFFIX,anthropic.com,Proxy
-            - MATCH,DIRECT
-
-          注意：此代理最长可用 6 小时，到期后请重新触发 workflow。
+          其余配置（port/uuid/path）不变。
+          有效期 6 小时，到期后重新触发 workflow 并更新 server。
           """
 
           msg = MIMEText(body)
