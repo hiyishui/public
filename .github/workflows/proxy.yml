@@ -21,14 +21,21 @@ jobs:
           }
           EOF
 
-      - name: Install ngrok
+      - name: Start tunnel & get address
         run: |
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-            | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install -y ngrok
-          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+          # 使用 localhost.run，无需注册
+          ssh -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=60 \
+              -R 8388:localhost:8388 \
+              nokey@localhost.run > /tmp/tunnel.log 2>&1 &
+          sleep 8
+          # 解析地址
+          TUNNEL_LINE=$(cat /tmp/tunnel.log | grep -o '[a-z0-9]*\.lhr\.life:[0-9]*' | head -1)
+          HOST=$(echo $TUNNEL_LINE | cut -d: -f1)
+          PORT=$(echo $TUNNEL_LINE | cut -d: -f2)
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "代理地址: $HOST:$PORT"
 
       - name: Start Shadowsocks
         run: sudo systemctl start shadowsocks-libev
