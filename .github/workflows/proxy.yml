@@ -30,14 +30,23 @@ jobs:
               -o ServerAliveInterval=60 \
               -R 8388:localhost:8388 \
               nokey@localhost.run > /tmp/tunnel.log 2>&1 &
-          sleep 8
+          sleep 10
+
+          echo "=== tunnel log ==="
           cat /tmp/tunnel.log
-          TUNNEL_LINE=$(cat /tmp/tunnel.log | grep -o '[a-z0-9]*\.lhr\.life:[0-9]*' | head -1)
+
+          # 尝试多种格式匹配
+          TUNNEL_LINE=$(grep -oP '[a-z0-9\-]+\.lhr\.life:\d+' /tmp/tunnel.log | head -1)
+          echo "=== matched line: $TUNNEL_LINE ==="
+
           HOST=$(echo $TUNNEL_LINE | cut -d: -f1)
           PORT=$(echo $TUNNEL_LINE | cut -d: -f2)
+
+          echo "HOST=$HOST"
+          echo "PORT=$PORT"
+
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
-          echo "代理地址: $HOST:$PORT"
 
       - name: Send email notification
         run: |
@@ -49,51 +58,7 @@ jobs:
           port = "${{ env.PORT }}"
           password = "${{ secrets.SS_PASSWORD }}"
 
-          body = f"""Shadowsocks 代理已启动，请更新 ClashX 配置：
-
-          server:   {host}
-          port:     {port}
-          cipher:   chacha20-ietf-poly1305
-          password: {password}
-
-          ==============================
-          ClashX / Clash for Windows config.yaml 完整配置：
-
-          mixed-port: 7890
-          allow-lan: false
-          mode: rule
-          log-level: info
-
-          proxies:
-            - name: "GitHub"
-              type: ss
-              server: {host}
-              port: {port}
-              cipher: chacha20-ietf-poly1305
-              password: {password}
-
-          proxy-groups:
-            - name: "Proxy"
-              type: select
-              proxies:
-                - GitHub
-
-          rules:
-            - DOMAIN-SUFFIX,github.com,Proxy
-            - DOMAIN-SUFFIX,githubcopilot.com,Proxy
-            - DOMAIN-SUFFIX,copilot.github.com,Proxy
-            - DOMAIN-SUFFIX,api.github.com,Proxy
-            - DOMAIN-SUFFIX,objects.githubusercontent.com,Proxy
-            - DOMAIN-SUFFIX,vscode.dev,Proxy
-            - DOMAIN-SUFFIX,marketplace.visualstudio.com,Proxy
-            - DOMAIN-SUFFIX,google.com,Proxy
-            - DOMAIN-SUFFIX,youtube.com,Proxy
-            - DOMAIN-SUFFIX,anthropic.com,Proxy
-            - MATCH,DIRECT
-
-          ==============================
-          注意：此代理最长可用 6 小时，到期后请重新触发 workflow。
-          """
+          body = f"server: {host}\nport: {port}\npassword: {password}"
 
           msg = MIMEText(body)
           msg["Subject"] = "✅ Shadowsocks 代理已启动"
