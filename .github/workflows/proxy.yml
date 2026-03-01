@@ -1,0 +1,120 @@
+name: SS Proxy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Shadowsocks
+        run: sudo apt-get install -y shadowsocks-libev
+
+      - name: Configure Shadowsocks
+        run: |
+          sudo tee /etc/shadowsocks-libev/config.json > /dev/null << EOF
+          {
+            "server": "0.0.0.0",
+            "server_port": 8388,
+            "password": "${{ secrets.SS_PASSWORD }}",
+            "method": "chacha20-ietf-poly1305"
+          }
+          EOF
+
+      - name: Install ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update && sudo apt install -y ngrok
+          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+
+      - name: Start Shadowsocks
+        run: sudo systemctl start shadowsocks-libev
+
+      - name: Start ngrok & get address
+        run: |
+          ngrok tcp 8388 > /dev/null &
+          sleep 5
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data['tunnels'][0]['public_url'])
+          ")
+          HOST=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d: -f1)
+          PORT=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d: -f2)
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "代理地址: $HOST:$PORT"
+
+      - name: Send email notification
+        run: |
+          python3 << EOF
+          import smtplib
+          from email.mime.text import MIMEText
+
+          host = "${{ env.HOST }}"
+          port = "${{ env.PORT }}"
+          password = "${{ secrets.SS_PASSWORD }}"
+
+          body = f"""Shadowsocks 代理已启动，请更新 ClashX 配置：
+
+          server:   {host}
+          port:     {port}
+          cipher:   chacha20-ietf-poly1305
+          password: {password}
+
+          ==============================
+          ClashX / Clash for Windows config.yaml 完整配置：
+
+          mixed-port: 7890
+          allow-lan: false
+          mode: rule
+          log-level: info
+
+          proxies:
+            - name: "GitHub"
+              type: ss
+              server: {host}
+              port: {port}
+              cipher: chacha20-ietf-poly1305
+              password: {password}
+
+          proxy-groups:
+            - name: "Proxy"
+              type: select
+              proxies:
+                - GitHub
+
+          rules:
+            - DOMAIN-SUFFIX,github.com,Proxy
+            - DOMAIN-SUFFIX,githubcopilot.com,Proxy
+            - DOMAIN-SUFFIX,copilot.github.com,Proxy
+            - DOMAIN-SUFFIX,api.github.com,Proxy
+            - DOMAIN-SUFFIX,objects.githubusercontent.com,Proxy
+            - DOMAIN-SUFFIX,vscode.dev,Proxy
+            - DOMAIN-SUFFIX,marketplace.visualstudio.com,Proxy
+            - DOMAIN-SUFFIX,google.com,Proxy
+            - DOMAIN-SUFFIX,youtube.com,Proxy
+            - DOMAIN-SUFFIX,anthropic.com,Proxy
+            - MATCH,DIRECT
+
+          ==============================
+          注意：此代理最长可用 6 小时，到期后请重新触发 workflow。
+          """
+
+          msg = MIMEText(body)
+          msg["Subject"] = "✅ Shadowsocks 代理已启动"
+          msg["From"] = "${{ secrets.MAIL_USER }}"
+          msg["To"] = "${{ secrets.MAIL_USER }}"
+
+          with smtplib.SMTP_SSL("smtp.163.com", 465) as server:
+              server.login("${{ secrets.MAIL_USER }}", "${{ secrets.MAIL_PASSWORD }}")
+              server.send_message(msg)
+
+          print("邮件发送成功")
+          EOF
+
+      - name: Keep alive (6 hours)
+        run: sleep 21600
