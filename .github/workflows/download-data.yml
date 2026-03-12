@@ -1,0 +1,95 @@
+name: 下载盘口数据
+permissions:
+  contents: write
+
+on:
+#   schedule:
+#     - cron: '0 8 * * 1-5'  # UTC 08:00 = 北京 16:00, 工作日收盘后
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天'
+        required: false
+        type: string
+      codes:
+        description: '股票代码(纯数字), 逗号分隔, 留空=全部'
+        required: false
+        type: string
+      force:
+        description: '强制重下载已完成的日期'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      date: ${{ steps.matrix.outputs.date }}
+      download_shard_mode: ${{ steps.matrix.outputs.download_shard_mode }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: download
+          DATE: ${{ inputs.date }}
+          ONLY_CODES: ${{ inputs.codes }}
+          FORCE: ${{ inputs.force }}
+          DOWNLOAD_SHARD_MODE: auto
+          DOWNLOAD_DAY_CHUNK_SIZE: "500"
+          DOWNLOAD_MATRIX_MAX_JOBS: "256"
+          EXCLUDE_BJ_STAR: "true"
+        run: python3 scripts/prepare_matrix.py
+
+  download:
+    if: needs.prepare.outputs.should_run == 'true'
+    needs: prepare
+    runs-on: ubuntu-latest
+    concurrency:
+      group: download-data-${{ matrix.date }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载数据 (日期 ${{ matrix.date }}, 分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
+        env:
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
+          SECIDS: ${{ matrix.secids }}
+          USE_ALL_SECIDS: ${{ matrix.all_secids }}
+          EXCLUDE_BJ_STAR: "true"
+          SHARD_ID: ${{ matrix.shard }}
+          DATE: ${{ matrix.date }}
+          FORCE: ${{ inputs.force }}
+          CHECK_DAT_COMPLETENESS: "true"
+          DAT_LAST_TS_MIN: "144500"
+          DAT_ACTIVE_MIN_SIZE: "2000"
+        run: python3 scripts/download_data.py
+
+      - name: 本分片完成后推送日期仓库
+        if: success() && !cancelled()
+        env:
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
+          DATA_DIR: data/dl_output
+          PUSH_BATCH_SIZE: "500"
+        run: python3 scripts/push_date_repo.py
