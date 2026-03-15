@@ -1,0 +1,198 @@
+name: Extract Base Pankou
+
+on:
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: "日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天, mini-10=最小日期向前10个交易日"
+        required: false
+        type: string
+      force:
+        description: "强制提取 (已存在也重新提取)"
+        required: false
+        type: boolean
+        default: false
+  # schedule:
+  #   - cron: "30 8 * * 1-5"  # UTC 8:30 = 北京 16:30
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      dates: ${{ steps.resolve.outputs.dates }}
+      date_matrix: ${{ steps.matrix.outputs.dates }}
+    steps:
+      - name: 检出 stock-grabber (trade_date.json)
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          fetch-depth: 1
+          filter: blob:none
+          path: .work/stock-grabber
+          sparse-checkout: |
+            data/trade_date.json
+          sparse-checkout-cone-mode: false
+
+      - name: 解析日期 & 跳过已存在
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          normalize_date() {
+            local raw="$1"
+            local compact
+            compact=$(echo "$raw" | tr -cd '0-9')
+            if [ "${#compact}" -ne 8 ]; then
+              return 1
+            fi
+            date -d "${compact:0:4}-${compact:4:2}-${compact:6:2}" +%Y%m%d 2>/dev/null || return 1
+          }
+
+          RAW_INPUT="${{ inputs.dates }}"
+          INPUT=$(echo "$RAW_INPUT" | xargs)
+          if [ -z "$INPUT" ]; then
+            INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
+          elif [ "$INPUT" = "mini-10" ]; then
+            echo "🧩 mini-10 模式: 基于 gp-features/base/pankou 最早日期向前回溯 10 个交易日"
+            export GH_TOKEN="${{ secrets.LARKSELF_PAT }}"
+            cat > /tmp/_mini10.py << 'PYEOF'
+          import bisect, json, os, re, sys, urllib.error, urllib.parse, urllib.request
+          OWNER, REPO, REF = "larkself", "gp-features", "main"
+          def fail(msg):
+              print(f"\u274c " + msg, file=sys.stderr); sys.exit(1)
+          with open(".work/stock-grabber/data/trade_date.json", encoding="utf-8") as f:
+              trade_dates = sorted(set(d.replace("-", "") for d in json.load(f).get("trade_dates", [])))
+          if not trade_dates: fail("trade_date.json no data")
+          token = os.environ.get("GH_TOKEN", "")
+          headers = {"Accept": "application/vnd.github+json"}
+          if token: headers["Authorization"] = f"token {token}"
+          def list_dir(path):
+              url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{urllib.parse.quote(path)}?ref={REF}"
+              req = urllib.request.Request(url, headers=headers)
+              try:
+                  with urllib.request.urlopen(req) as resp: payload = json.load(resp)
+              except urllib.error.HTTPError as exc: fail(f"HTTP {exc.code} reading {path}")
+              except urllib.error.URLError as exc: fail(f"URL error: {exc.reason}")
+              if not isinstance(payload, list): fail(f"{path} is not a directory")
+              return payload
+          year_dirs = sorted(i["name"] for i in list_dir("base/pankou") if i.get("type") == "dir" and re.fullmatch(r"\d{4}", i.get("name", "")))
+          if not year_dirs: fail("no year dirs")
+          min_existing = None
+          for year in year_dirs:
+              dates_in_year = [m.group(1) for i in list_dir(f"base/pankou/{year}") if i.get("type") == "file" for m in [re.fullmatch(r"(\d{8})\.parquet", i.get("name", ""))] if m]
+              if dates_in_year: min_existing = min(dates_in_year); break
+          if not min_existing: fail("no parquet files found")
+          idx = bisect.bisect_left(trade_dates, min_existing)
+          print(",".join(trade_dates[max(0, idx - 10):idx]))
+          PYEOF
+            INPUT=$(python3 /tmp/_mini10.py)
+            if [ -z "$INPUT" ]; then
+              echo "⚠️ mini-10 没有可回溯的交易日"
+            else
+              echo "📅 mini-10 解析结果: $INPUT"
+            fi
+          fi
+
+          ALL=""
+          IFS=',' read -ra PARTS <<< "$INPUT"
+          for part in "${PARTS[@]}"; do
+            part=$(echo "$part" | xargs)
+            if [[ "$part" == *"~"* ]]; then
+              S_RAW=$(echo "$part" | cut -d'~' -f1)
+              E_RAW=$(echo "$part" | cut -d'~' -f2)
+              S=$(normalize_date "$S_RAW") || { echo "❌ 无效日期: $S_RAW" >&2; exit 1; }
+              E=$(normalize_date "$E_RAW") || { echo "❌ 无效日期: $E_RAW" >&2; exit 1; }
+              if [[ "$S" -gt "$E" ]]; then
+                echo "❌ 日期范围起始晚于结束: $part" >&2
+                exit 1
+              fi
+              C="$S"
+              while [[ "$C" -le "$E" ]]; do
+                ALL="${ALL:+$ALL }$C"
+                C=$(date -d "${C:0:4}-${C:4:2}-${C:6:2} + 1 day" +%Y%m%d)
+              done
+            else
+              D=$(normalize_date "$part") || { echo "❌ 无效日期: $part" >&2; exit 1; }
+              ALL="${ALL:+$ALL }$D"
+            fi
+          done
+
+          TRADE_DATES=$(python3 -c "
+          import json
+          with open('.work/stock-grabber/data/trade_date.json') as f:
+              data = json.load(f)
+          for d in data['trade_dates']:
+              print(d.replace('-', ''))
+          ")
+
+          TRADING=""
+          for D in $ALL; do
+            if echo "$TRADE_DATES" | grep -qx "$D"; then
+              TRADING="${TRADING:+$TRADING }$D"
+            else
+              echo "⏭️ $D 非交易日, 跳过"
+            fi
+          done
+          ALL="$TRADING"
+
+          DEDUP=""
+          for D in $ALL; do
+            case " $DEDUP " in
+              *" $D "*) ;;
+              *) DEDUP="${DEDUP:+$DEDUP }$D" ;;
+            esac
+          done
+          ALL="$DEDUP"
+
+          FORCE="${{ inputs.force }}"
+          DATES="$ALL"
+          if [ "$FORCE" != "true" ]; then
+            DATES=""
+            for D in $ALL; do
+              YEAR=${D:0:4}
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: token ${{ secrets.LARKSELF_PAT }}" \
+                "https://api.github.com/repos/larkself/gp-features/contents/base/pankou/${YEAR}/${D}.parquet")
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "⏭️ $D 已存在, 跳过"
+              else
+                DATES="${DATES:+$DATES }$D"
+              fi
+            done
+          fi
+
+          echo "dates=$DATES" >> "$GITHUB_OUTPUT"
+          if [ -z "$DATES" ]; then
+            echo "✅ 所有日期已处理"
+          else
+            echo "📅 待处理: $DATES"
+          fi
+
+      - name: 生成日期 matrix
+        id: matrix
+        run: |
+          set -euo pipefail
+          DATES="${{ steps.resolve.outputs.dates }}"
+          if [ -z "$DATES" ]; then
+            echo 'dates=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          export DATES
+          DATES_JSON=$(python3 -c "import json,os; print(json.dumps([d for d in os.environ['DATES'].split() if d]))")
+          echo "dates=${DATES_JSON}" >> "$GITHUB_OUTPUT"
+
+  extract-by-date:
+    needs: prepare
+    if: needs.prepare.outputs.dates != ''
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        date: ${{ fromJson(needs.prepare.outputs.date_matrix) }}
+    uses: ./.github/workflows/extract-pankou-by-date.yml
+    with:
+      date: ${{ matrix.date }}
+    secrets: inherit

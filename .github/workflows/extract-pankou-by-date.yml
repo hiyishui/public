@@ -1,0 +1,146 @@
+name: Extract Base Pankou (By Date)
+
+on:
+  workflow_call:
+    inputs:
+      date:
+        description: "日期: YYYYMMDD"
+        required: true
+        type: string
+    secrets:
+      GRABBER_PAT:
+        required: true
+      LARKSELF_PAT:
+        required: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  extract-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出 stock-grabber 依赖
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          fetch-depth: 1
+          filter: blob:none
+          path: stock-grabber
+          sparse-checkout: |
+            tools/dat_to_dataframe.py
+            tools/stock_shares_parquet.py
+            data/gb/guben.parquet
+            data/all_stocks.json
+            features/dat_loader.py
+            features/features_daily.py
+            hicccx999/extract_base_pankou.py
+          sparse-checkout-cone-mode: false
+
+      - name: 克隆日期仓库
+        env:
+          CLONE_TOKEN: ${{ secrets.LARKSELF_PAT }}
+        run: |
+          set -euo pipefail
+          DC="${{ inputs.date }}"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+
+          git config --global protocol.version 2
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+
+          for TRY in 1 2 3; do
+            rm -rf date-repo
+            echo "📦 克隆 ${DD} (attempt ${TRY}/3) ..."
+
+            if git clone --depth 1 --filter=blob:none --no-tags --sparse \
+              "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
+              date-repo \
+              && (cd date-repo && git sparse-checkout set raw/pankou && git checkout); then
+              break
+            fi
+
+            if [ "$TRY" -eq 3 ]; then
+              echo "❌ 连续 3 次克隆失败" >&2
+              exit 1
+            fi
+            echo "⚠️ 克隆失败, 准备重试"
+            sleep $((TRY * 2))
+          done
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install numpy pandas pyarrow zstandard
+
+      - name: 提取特征
+        run: |
+          set -euo pipefail
+          DC="${{ inputs.date }}"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+
+          python3 stock-grabber/hicccx999/extract_base_pankou.py \
+            --target-date "$DD" \
+            --dat-dir date-repo \
+            --output-dir output \
+            --grabber-dir stock-grabber \
+            --all-stocks-json stock-grabber/data/all_stocks.json
+
+          rm -rf date-repo
+
+      - name: 推送到 gp-features
+        env:
+          PUSH_TOKEN: ${{ secrets.LARKSELF_PAT }}
+        run: |
+          set -euo pipefail
+          DC="${{ inputs.date }}"
+          YEAR="${DC:0:4}"
+
+          if [ ! -f "output/${DC}.parquet" ]; then
+            echo "⚠️ ${DC}: 无产出文件, 跳过推送"
+            exit 0
+          fi
+
+          git clone --depth 1 --filter=blob:none --no-tags --sparse \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/larkself/gp-features.git" \
+            gp-features
+
+          cd gp-features
+          git sparse-checkout set base/pankou
+          git checkout
+
+          mkdir -p "base/pankou/${YEAR}"
+          cp "../output/${DC}.parquet" "base/pankou/${YEAR}/${DC}.parquet"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "base/pankou/${YEAR}/${DC}.parquet"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ ${DC} 无变更, 跳过提交"
+            exit 0
+          fi
+
+          git commit -m "base/pankou: ${DC}"
+
+          # 随机延迟分散并行 push 冲突
+          sleep $((RANDOM % 30))
+
+          for TRY in 1 2 3 4 5 6 7 8 9 10; do
+            if git push; then
+              echo "✅ ${DC} 推送成功"
+              exit 0
+            fi
+            echo "⚠️ push 失败, 尝试 rebase 后重试 (${TRY}/10)"
+            git pull --rebase
+            sleep $((TRY * 3))
+          done
+
+          echo "❌ ${DC} push 连续失败" >&2
+          exit 1
